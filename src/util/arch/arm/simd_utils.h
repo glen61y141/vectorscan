@@ -57,7 +57,14 @@ static really_inline m128 not128(m128 a) {
 
 /** \brief Return 1 if a and b are different otherwise 0 */
 static really_inline int diff128(m128 a, m128 b) {
+    #ifdef __aarch64__
     int res = vaddvq_s8((int8x16_t) vceqq_s32(a, b));
+    #else
+    const int16x8_t x2 = vpaddlq_s8((int8x16_t) vceqq_s32(a, b));
+    const int32x4_t x4 = vpaddlq_s16(x2);
+    const int64x2_t x8 = vpaddlq_s32(x4);
+    int res = vgetq_lane_s64(x8, 0) + vgetq_lane_s64(x8, 1);
+    #endif
     return (-16 != res);
 }
 
@@ -71,7 +78,12 @@ static really_inline int isnonzero128(m128 a) {
  */
 static really_inline u32 diffrich128(m128 a, m128 b) {
     static const uint32x4_t movemask = { 1, 2, 4, 8 };
+    #ifdef __aarch64__
     return vaddvq_u32(vandq_u32(vmvnq_s32(vceqq_s32((int32x4_t)a, (int32x4_t)b)), movemask));
+    #else
+    const uint64x2_t x2 = vpaddlq_u32(vandq_u32(vmvnq_s32(vceqq_s32((int32x4_t)a, (int32x4_t)b)), movemask));
+    return vgetq_lane_u64(x2, 0) + vgetq_lane_u64(x2, 1);
+    #endif
 }
 
 /**
@@ -80,7 +92,14 @@ static really_inline u32 diffrich128(m128 a, m128 b) {
  */
 static really_inline u32 diffrich64_128(m128 a, m128 b) {
     static const uint64x2_t movemask = { 1, 4 };
+    #ifdef __aarch64__
     return vaddvq_u64(vandq_u64(vmvnq_s32(vceqq_s64((int64x2_t)a, (int64x2_t)b)), movemask));
+    #else
+    uint32x4_t cmp = vceqq_u32(vreinterpretq_u32_s64(a), vreinterpretq_u32_s64(b));
+    uint32x4_t swapped = vrev64q_u32(cmp);
+    uint32x4_t cmpeq_epi64 = vreinterpretq_s64_u32(vandq_u32(cmp, swapped));
+    return vgetq_lane_u64(vandq_u64(vmvnq_s32(cmpeq_epi64), movemask), 0) + vgetq_lane_u64(vandq_u64(vmvnq_s32(cmpeq_epi64), movemask), 1);
+    #endif
 }
 
 static really_really_inline
@@ -105,7 +124,11 @@ m128 rshift_m128(m128 a, unsigned b) {
 
 static really_really_inline
 m128 lshift64_m128(m128 a, unsigned b) {
+    #ifdef __aarch64__
     return (m128) vshlq_n_s64((int64x2_t)a, b);
+    #else
+    return (m128) vshlq_s64((int64x2_t)(a), vdupq_n_s64(b));
+    #endif
 }
 
 static really_really_inline
@@ -118,7 +141,13 @@ static really_inline m128 eq128(m128 a, m128 b) {
 }
 
 static really_inline m128 eq64_m128(m128 a, m128 b) {
+    #ifdef __aarch64__
     return (m128) vceqq_u64((int64x2_t)a, (int64x2_t)b);
+    #else
+    uint32x4_t cmp = vceqq_u32(vreinterpretq_u32_s64(a), vreinterpretq_u32_s64(b));
+    uint32x4_t swapped = vrev64q_u32(cmp);
+    return vreinterpretq_s64_u32(vandq_u32(cmp, swapped));
+    #endif
 }
 
 
@@ -127,8 +156,8 @@ static really_inline u32 movemask128(m128 a) {
 
     // Compute the mask from the input
     uint64x2_t mask  = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vandq_u8((uint8x16_t)a, powers))));
-    uint64x2_t mask1 = (m128)vextq_s8(mask, zeroes128(), 7);
-    mask = vorrq_u8(mask, mask1);
+    uint64x2_t mask1 = (m128)vextq_s8(mask, (int8x16_t) zeroes128(), 7);
+    mask = vorrq_u8((uint8x16_t) mask, (uint8x16_t) mask1);
 
     // Get the resulting bytes
     uint16_t output;
@@ -159,7 +188,7 @@ static really_inline u64a movq(const m128 in) {
 /* another form of movq */
 static really_inline
 m128 load_m128_from_u64a(const u64a *p) {
-    return (m128) vsetq_lane_u64(*p, zeroes128(), 0);
+    return (m128) vsetq_lane_u64(*p, (uint64x2_t) zeroes128(), 0);
 }
 
 static really_inline u32 extract32from128(const m128 in, unsigned imm) {
@@ -192,14 +221,14 @@ static really_inline u64a extract64from128(const m128 in, unsigned imm) {
 #else
     switch (imm) {
     case 0:
-        return vgetq_lane_u64((uint32x4_t) in, 0);
-	break;
+        return vgetq_lane_u64((uint64x2_t) in, 0);
+        break;
     case 1:
-        return vgetq_lane_u64((uint32x4_t) in, 1);
-	break;
+        return vgetq_lane_u64((uint64x2_t) in, 1);
+        break;
     default:
-	return 0;
-	break;
+        return 0;
+        break;
     }
 #endif
 }
@@ -320,13 +349,25 @@ m128 lshiftbyte_m128(m128 a, unsigned b) {
 }
 
 static really_inline
-m128 variable_byte_shift_m128(m128 in, s32 amount) {
+m128 variable_byte_shift_m128(m128 tbl, s32 amount) {
     assert(amount >= -16 && amount <= 16);
     static const uint8x16_t vbs_mask = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
     const uint8x16_t outside_mask = set1_16x8(0xf0);
 
-    m128 shift_mask = palignr_imm(vbs_mask, outside_mask, 16 - amount);
-    return vqtbl1q_s8(in, shift_mask);
+    m128 idx_masked = palignr_imm(vbs_mask, outside_mask, 16 - amount);
+    #ifdef __aarch64__
+    return (m128)vqtbl1q_s8(tbl, idx_masked);
+    #else
+    int8x16_t ret;
+    // %e and %f represent the even and odd D registers
+    // respectively.
+    __asm__ __volatile__(
+        "vtbl.8  %e[ret], {%e[tbl], %f[tbl]}, %e[idx]\n"
+        "vtbl.8  %f[ret], {%e[tbl], %f[tbl]}, %f[idx]\n"
+        : [ret] "=&w"(ret)
+        : [tbl] "w"(tbl), [idx] "w"(idx_masked));
+    return vreinterpretq_s64_s8(ret);
+    #endif
 }
 
 #ifdef __cplusplus
@@ -366,22 +407,34 @@ char testbit128(m128 val, unsigned int n) {
 }
 
 static really_inline
-m128 pshufb_m128(m128 a, m128 b) {
+m128 pshufb_m128(m128 tbl, m128 b) {
     /* On Intel, if bit 0x80 is set, then result is zero, otherwise which the lane it is &0xf.
        In NEON, if >=16, then the result is zero, otherwise it is that lane.
        btranslated is the version that is converted from Intel to NEON.  */
-    int8x16_t btranslated = vandq_s8((int8x16_t)b,vdupq_n_s8(0x8f));
-    return (m128)vqtbl1q_s8((int8x16_t)a, (uint8x16_t)btranslated);
+    int8x16_t idx_masked = vandq_s8((int8x16_t)b,vdupq_n_s8(0x8f));
+    #ifdef __aarch64__
+    return (m128)vqtbl1q_s8((int8x16_t)tbl, (uint8x16_t)idx_masked);
+    #else
+    int8x16_t ret;
+    // %e and %f represent the even and odd D registers
+    // respectively.
+    __asm__ __volatile__(
+        "vtbl.8  %e[ret], {%e[tbl], %f[tbl]}, %e[idx]\n"
+        "vtbl.8  %f[ret], {%e[tbl], %f[tbl]}, %f[idx]\n"
+        : [ret] "=&w"(ret)
+        : [tbl] "w"(tbl), [idx] "w"(idx_masked));
+    return vreinterpretq_s64_s8(ret);
+    #endif
 }
 
 static really_inline
 m128 max_u8_m128(m128 a, m128 b) {
-    return (m128) vmaxq_u8((int8x16_t)a, (int8x16_t)b);
+    return (m128) vmaxq_u8((uint8x16_t)a, (uint8x16_t)b);
 }
 
 static really_inline
 m128 min_u8_m128(m128 a, m128 b) {
-    return (m128) vminq_u8((int8x16_t)a, (int8x16_t)b);
+    return (m128) vminq_u8((uint8x16_t)a, (uint8x16_t)b);
 }
 
 static really_inline
